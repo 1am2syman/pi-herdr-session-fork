@@ -1,0 +1,35 @@
+{
+  "name": "pi-herdr-session-fork",
+  "version": "0.1.0",
+  "description": "Fork a Pi conversation stage into a named Herdr tab while keeping the original session active.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1am2syman/pi-herdr-session-fork.git"
+  },
+  "homepage": "https://github.com/1am2syman/pi-herdr-session-fork#readme",
+  "bugs": {
+    "url": "https://github.com/1am2syman/pi-herdr-session-fork/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "herdr",
+    "session",
+    "fork"
+  ],
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/herdr-fork.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
