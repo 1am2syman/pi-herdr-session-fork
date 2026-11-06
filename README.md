@@ -1,8 +1,19 @@
 # pi-herdr-session-fork
 
-Open a side conversation from any stage of a [Pi](https://pi.dev) session in a new [Herdr](https://herdr.dev) tab. Your original session stays active, and focus stays in your current tab.
+Open a side conversation from any stage of a [Pi](https://pi.dev) session in a new **herdr-app** tab, powered by **herdr-core** (`hc`). Your original session stays active, and focus stays in your current tab.
 
-One slash command, a stage picker, and a name prompt. Uses the current **herdr-core** (`hc`) and **herdr-app**; no additional runtime packages.
+One slash command, a stage picker, and a name prompt. No additional runtime packages beyond Pi, herdr-core, and herdr-app.
+
+## Herdr support
+
+This extension supports the current [Herdr](https://herdr.dev) stack:
+
+| Component | Role |
+| --- | --- |
+| **herdr-core** (`hc`) | Starts and keeps the fork’s Pi terminal running independently of the original terminal |
+| **herdr-app** | Displays the fork in a named tab in the original session’s space |
+
+Both components are required. Run Pi inside a herdr-app tab backed by herdr-core, with `pi`, `hc`, and `herdr-app` on `PATH` and the app running on the same machine as Pi. The legacy `herdr` multiplexer is not supported by this version.
 
 ## Install from Git
 
@@ -25,11 +36,13 @@ git clone https://github.com/1am2syman/pi-herdr-session-fork.git
 pi install ./pi-herdr-session-fork
 ```
 
-If you previously copied `herdr-fork.ts` into `~/.pi/agent/extensions/`, move that standalone copy out of the extensions directory before installing this package, so `/hfork` is registered only once.
+If you previously copied `herdr-fork.ts` into `~/.pi/agent/extensions/`, move that standalone copy out of the extensions directory before installing this package, so `/hfork` is registered only once. Then run `/reload`.
+
+If `/hfork` still reports **“requires Pi running inside Herdr”** after upgrading, Pi is running the old extension. Check for a standalone copy in `~/.pi/agent/extensions/`, move it outside that directory, install or update the package, and run `/reload` again.
 
 ## Use it
 
-In Pi, running inside a Herdr terminal:
+In interactive Pi, running inside a herdr-app tab backed by herdr-core:
 
 ```text
 /hfork

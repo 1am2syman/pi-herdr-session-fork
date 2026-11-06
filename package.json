@@ -1,7 +1,7 @@
 {
   "name": "pi-herdr-session-fork",
   "version": "0.1.0",
-  "description": "Fork a Pi conversation stage into a named Herdr tab while keeping the original session active.",
+  "description": "Fork a Pi conversation stage into a named herdr-app tab using herdr-core, while keeping the original session active.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -16,6 +16,8 @@
     "pi-package",
     "pi-extension",
     "herdr",
+    "herdr-core",
+    "herdr-app",
     "session",
     "fork"
   ],
