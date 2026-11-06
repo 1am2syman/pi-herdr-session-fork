@@ -2,7 +2,7 @@
 
 Open a side conversation from any stage of a [Pi](https://pi.dev) session in a new [Herdr](https://herdr.dev) tab. Your original session stays active, and focus stays in your current tab.
 
-One slash command, a stage picker, and a name prompt. No runtime dependencies beyond Pi and Herdr.
+One slash command, a stage picker, and a name prompt. Uses the current **herdr-core** (`hc`) and **herdr-app**; no additional runtime packages.
 
 ## Install from Git
 
@@ -81,15 +81,16 @@ Both sessions use the **same working directory and files**. This extension forks
 
 ## Requirements and behavior
 
-- Pi interactive terminal mode inside Herdr (`HERDR_ENV=1`).
-- `pi` and `herdr` available on `PATH`.
+- Pi interactive terminal mode in a terminal managed by herdr-core (`HC_TERMINAL_ID` is set) and shown in a herdr-app space.
+- `pi`, `hc`, and `herdr-app` available on `PATH`, with the app running on the same machine as Pi.
 - A saved conversation with at least one entry; sessions started with `--no-session` cannot be forked.
 - Pi session format version 3. The extension checks the version before writing a fork.
-- Herdr CLI support for `tab create` and `agent start --kind pi`.
 
-The new tab opens without taking focus. The original session is never switched or written to by the extension. The fork is stored next to its source session, including when you use a custom session directory.
+The extension reads the current terminal’s `herdr.space` label through `hc get`, starts a separate Pi terminal through `hc run --bg`, and lets herdr-app adopt it into a new tab in that space. It names the tab through `herdr-app do tab.rename`. The new tab opens without taking focus, even if another space is currently selected. The side conversation survives the original terminal closing.
 
-If a launch fails, the error reports any created tab and fork path. These are preserved for inspection because a launch timeout can occur after a process has started. Check the reported tab before retrying.
+The original session is never switched or written to by the extension. The fork is stored next to its source session, including when you use a custom session directory. The legacy `herdr` CLI and `HERDR_ENV` / `HERDR_WORKSPACE_ID` variables are no longer used. Running `/hfork` on a remote machine whose app runs elsewhere is not supported.
+
+If a launch fails, the error reports the fork path and any assigned terminal name and tab ID. These are preserved for inspection because a launch timeout can occur after a process has started. Check `hc get <reported-terminal-name>` and the app before retrying; launches and renames are never automatically retried.
 
 `/hfork` creates a snapshot from recorded session entries. It does not duplicate an in-flight model request, tool execution, background job, or server.
 
@@ -106,15 +107,25 @@ Run `/reload` afterward. For a local clone, use `git pull` inside the clone to u
 
 ## Verification
 
-Tested with Pi 1.3.0 in real Herdr tabs:
+Development requires Node.js 22.18+ and npm:
 
-- The live slash command displayed the stage picker and name prompt.
-- Selecting an earlier stage copied that history and excluded later messages.
-- The fork used a different session file and recorded its parent.
-- Session and tab names matched, including spaces and literal shell characters.
-- Focus remained unchanged, and the source session continued independently.
-- Cancelling either dialog created no fork.
-- The new Pi session completed a real model response without changing the source.
+```bash
+npm ci
+npm test
+npm run typecheck
+```
+
+The regression suite checks active-branch and earlier-stage history, unchanged source files, cancellation, literal shell characters in names, delayed app adoption, and recovery after CLI or launch failures. It uses simulated CLI responses and creates no Herdr tabs.
+
+With `hc` and `pi` installed, also run:
+
+```bash
+npm run test:core
+```
+
+This integration check starts a real Pi process in an isolated herdr-core session with scratch config and state, verifies its arguments and independence from the source terminal, then cleans up that session. The app responses are simulated; it does not change the running Herdr window.
+
+For a manual app check, run `/hfork` from a saved conversation in herdr-app. Confirm that the new tab appears in the source space with the requested name, focus stays where it was, and the fork is ready for input. Repeat with an earlier stage and cancel each dialog once.
 
 The implementation is one TypeScript file: [extensions/herdr-fork.ts](extensions/herdr-fork.ts). Pi loads it directly, so there is no build step.
 
