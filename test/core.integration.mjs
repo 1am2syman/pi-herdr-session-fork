@@ -6,14 +6,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import register from "../extensions/herdr-fork.ts";
+import { coreRequest, CoreRpcError } from "../extensions/core-layout.ts";
 
 const exec = promisify(execFile);
 
-test("real hc launches an independent Pi fork with the requested session and labels", { timeout: 45_000 }, async (t) => {
+for (const appAvailable of [true, false]) {
+test(`real hc launches an independent Pi fork (${appAvailable ? "app adoption" : "Moshi headless document"})`, { timeout: 45_000 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "hfork-core-test-"));
   const overrides = {
     HC_SESSION: "hfork-integration",
     HC_TERMINAL_ID: undefined,
+    HC_SOCKET: undefined,
+    HC_TERMINAL_SOCKET: undefined,
     XDG_CONFIG_HOME: join(dir, "config"),
     XDG_DATA_HOME: join(dir, "data"),
     XDG_STATE_HOME: join(dir, "state"),
@@ -51,6 +55,13 @@ test("real hc launches an independent Pi fork with the requested session and lab
   ], { timeout: 10_000 })).stdout);
   terminals.push(sourceTerminal.address);
   process.env.HC_TERMINAL_ID = sourceTerminal.address;
+  const initialLayout = { spaces: [{ id: "source-space", name: "Source", tabs: [{
+    id: "source-tab", name: "Source tab", root: { id: "source-pane", type: "block", content: { terminal: sourceTerminal.address } },
+  }] }], extensionMetadata: { preserve: true } };
+  await coreRequest("doc.set", { name: "herdr-app", version: 0, value: initialLayout });
+  await assert.rejects(coreRequest("doc.set", { name: "herdr-app", version: 0, value: null }),
+    (error) => error instanceof CoreRpcError && error.kind === "conflict",
+    "Real core conflict envelopes must be classified without overwriting the layout");
 
   const source = join(dir, "source.jsonl");
   const timestamp = new Date().toISOString();
@@ -70,6 +81,7 @@ test("real hc launches an independent Pi fork with the requested session and lab
     registerCommand(_name, command) { handler = command.handler; },
     async exec(command, args, options) {
       if (command === "herdr-app") {
+        if (!appAvailable) return { code: 2, stdout: "", stderr: "herdr-app: no Herdr window: Connection refused" };
         if (args[0] === "ls") {
           // App transport is simulated; adoption uses real core metadata.
           const terminal = launched ? await hc("get", launched.address) : undefined;
@@ -82,6 +94,10 @@ test("real hc launches an independent Pi fork with the requested session and lab
         assert.deepEqual(args.slice(0, 2), ["do", "tab.rename"]);
         renamed = JSON.parse(args[2]);
         return { code: 0, stdout: "{}", stderr: "" };
+      }
+      if (command === "bash") {
+        const result = await exec("bash", args, { ...options, encoding: "utf8" });
+        return { code: 0, stdout: result.stdout, stderr: result.stderr };
       }
       assert.equal(command, "hc");
       const result = await exec(command, args, { ...options, encoding: "utf8" });
@@ -109,9 +125,23 @@ test("real hc launches an independent Pi fork with the requested session and lab
   assert.equal(terminal.parent, null);
   assert.equal(terminal.die_with_parent, false);
   assert.equal(terminal.labels["herdr.space"], "source-space");
-  assert.equal(renamed.id, terminal.labels["herdr.tab"]);
-  assert.equal(renamed.name, name);
-  assert.deepEqual(terminal.argv.slice(0, 2), ["pi", "--session"]);
+  if (appAvailable) {
+    assert.equal(renamed.id, terminal.labels["herdr.tab"]);
+    assert.equal(renamed.name, name);
+  } else {
+    assert.equal(renamed, undefined);
+    const document = await coreRequest("doc.get", { name: "herdr-app" });
+    const space = document.value.spaces.find((space) => space.id === "source-space");
+    const forkTab = space.tabs.find((tab) => JSON.stringify(tab.root).includes(`\"terminal\":\"${terminal.address}\"`));
+    assert.ok(forkTab, "Live fork must appear in the document consumed by Moshi's sidebar without herdr-app");
+    assert.equal(forkTab.name, name);
+    assert.equal(forkTab.id, terminal.labels["herdr.tab"]);
+    assert.deepEqual(space.tabs[0], initialLayout.spaces[0].tabs[0]);
+    assert.deepEqual(document.value.extensionMetadata, initialLayout.extensionMetadata);
+    assert.match(notifications.at(-1).message, /workspace/);
+  }
+  assert.ok(terminal.argv[0].startsWith("/"), "Daemon must receive an absolute Pi executable");
+  assert.equal(terminal.argv[1], "--session");
   assert.deepEqual(terminal.argv.slice(-2), ["--name", name]);
   const fork = (await readFile(terminal.argv[2], "utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(fork[0].parentSession, source);
@@ -120,3 +150,4 @@ test("real hc launches an independent Pi fork with the requested session and lab
   await hc("kill", sourceTerminal.address);
   assert.equal((await hc("get", launched.address)).state, "live");
 });
+}

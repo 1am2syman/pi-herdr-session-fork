@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { coreRequest, registerFork, type CoreRequest } from "./core-layout.ts";
 
 type CoreTerminal = {
   address: string;
@@ -20,12 +21,16 @@ type AppListing = {
 };
 
 export default function (pi: ExtensionAPI) {
+  registerHfork(pi, coreRequest);
+}
+
+export function registerHfork(pi: ExtensionAPI, request: CoreRequest) {
   pi.registerCommand("hfork", {
-    description: "Fork a conversation stage into a named Herdr tab",
+    description: "Fork a conversation stage into a named Herdr tab or herdr-core terminal",
     handler: async (_args, ctx) => {
       const terminal = process.env.HC_TERMINAL_ID;
       if (ctx.mode !== "tui" || !terminal) {
-        ctx.ui.notify("/hfork requires interactive Pi in a herdr-core terminal shown in herdr-app.", "error");
+        ctx.ui.notify("/hfork requires interactive Pi running in a herdr-core terminal.", "error");
         return;
       }
       const source = ctx.sessionManager.getSessionFile();
@@ -66,20 +71,34 @@ export default function (pi: ExtensionAPI) {
         };
 
         const current = await execJSON<CoreTerminal>("hc", ["get", terminal, "--json"]);
-        const space = current.labels?.["herdr.space"];
-        if (current.state !== "live" || !space) {
-          throw new Error("This terminal is not in a Herdr space. Open Pi in a herdr-app tab first.");
+        if (current.state !== "live") {
+          throw new Error("This herdr-core terminal is not live.");
         }
-        const app = await execJSON<AppListing>("herdr-app", ["ls"]);
-        if (!app.spaces.some((entry) => entry.id === space && !entry.machine)) {
-          throw new Error("The current terminal's space is not in this herdr-app window. Run /hfork on the same machine as the app.");
+        const space = current.labels?.["herdr.space"];
+
+        // A running local app handles adoption. Otherwise register the fork
+        // in the core-owned layout used by Moshi's headless workspace driver.
+        // Probe failures mean no local app; a successful probe still validates
+        // membership before any fork is created.
+        let appAvailable = false;
+        try {
+          const app = await execJSON<AppListing>("herdr-app", ["ls"]);
+          appAvailable = true;
+          if (!space) {
+            throw new Error("This terminal is not in a Herdr space. Open Pi in a herdr-app tab first.");
+          }
+          if (!app.spaces.some((entry) => entry.id === space && !entry.machine)) {
+            throw new Error("The current terminal's space is not in this herdr-app window. Run /hfork on the same machine as the app.");
+          }
+        } catch (error) {
+          if (appAvailable) throw error;
         }
 
         const selected = await ctx.ui.select("Fork through which stage?", stages.map((s) => s.label));
         if (selected === undefined) return;
         const stage = stages.find((s) => s.label === selected);
         if (!stage) return;
-        const name = (await ctx.ui.input("Name the new session and tab", "Side discussion"))?.trim();
+        const name = (await ctx.ui.input("Name the new session", "Side discussion"))?.trim();
         if (!name) return;
 
         const header = JSON.parse((await readFile(source, "utf8")).split("\n", 1)[0]);
@@ -97,36 +116,60 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Opening ${name}…`, "info");
         terminalName = `hfork-${id.slice(0, 8)}`;
         tabId = `tb${id.replace(/-/g, "")}`;
-        // App adoption through labels leaves focus alone. A sibling conversation
-        // has no parent so closing the source terminal cannot end the fork.
-        const created = await execJSON<CoreTerminal>("hc", [
+        // The herdr-core daemon may run with a minimal PATH, so resolve pi to
+        // an absolute path from this process's environment; the daemon then
+        // execs it directly with no PATH lookup.
+        const lookup = await pi.exec("bash", ["-lc", "command -v pi"], { cwd: ctx.cwd, timeout: 5_000 });
+        const piPath = (lookup.stdout || "").trim().split("\n")[0];
+        if (lookup.code !== 0 || !isAbsolute(piPath)) {
+          throw new Error("Could not resolve the pi executable path to launch the fork.");
+        }
+        // --no-parent keeps the fork alive when the source terminal closes; a
+        // forked conversation has no owner to inherit it from.
+        const runArgs = [
           "run", "--bg", "--json", "--no-parent", "--no-notify",
           "--name", terminalName, "--cwd", ctx.cwd,
-          "--label", `herdr.space=${space}`, "--label", `herdr.tab=${tabId}`,
-          "--", "pi", "--session", forkFile, "--name", name,
-        ], 65_000);
+        ];
+        const targetSpace = space ?? `sp${randomUUID().replaceAll("-", "")}`;
+        runArgs.push("--label", `herdr.space=${targetSpace}`, "--label", `herdr.tab=${tabId}`);
+        runArgs.push("--", piPath, "--session", forkFile, "--name", name);
+        const created = await execJSON<CoreTerminal>("hc", runArgs, 65_000);
         if (!created.address || created.state !== "live") {
           throw new Error("herdr-core did not return a live fork terminal.");
         }
 
-        // Adoption is asynchronous. Only retry reads; never repeat a launch or
-        // rename whose outcome could be unknown after a timeout.
-        const deadline = Date.now() + 5_000;
-        for (;;) {
-          const listing = await execJSON<AppListing>("herdr-app", ["ls"]);
-          const adopted = listing.spaces.some((entry) => entry.id === space && !entry.machine
-            && entry.tabs.some((tab) => tab.id === tabId
-              && tab.terminals.some((item) => item.terminal === created.address)));
-          if (adopted) break;
-          if (Date.now() >= deadline) throw new Error("Timed out waiting for herdr-app to show the fork terminal.");
-          await setTimeout(100);
+        if (appAvailable) {
+          // Adoption is asynchronous. Only retry reads; never repeat a launch
+          // or rename whose outcome could be unknown after a timeout.
+          const deadline = Date.now() + 5_000;
+          for (;;) {
+            const listing = await execJSON<AppListing>("herdr-app", ["ls"]);
+            const adopted = listing.spaces.some((entry) => entry.id === space && !entry.machine
+              && entry.tabs.some((tab) => tab.id === tabId
+                && tab.terminals.some((item) => item.terminal === created.address)));
+            if (adopted) break;
+            if (Date.now() >= deadline) throw new Error("Timed out waiting for herdr-app to show the fork terminal.");
+            await setTimeout(100);
+          }
+          await execJSON("herdr-app", ["do", "tab.rename", JSON.stringify({ id: tabId, name })]);
         }
-        await execJSON("herdr-app", ["do", "tab.rename", JSON.stringify({ id: tabId, name })]);
         const running = await execJSON<CoreTerminal>("hc", ["get", created.address, "--json"]);
         if (running.state !== "live") {
           throw new Error(`Fork terminal ${created.address} exited (code ${running.exit_code ?? "unknown"}). Inspect it with hc read ${created.address}.`);
         }
-        ctx.ui.notify(`Opened “${name}” in ${tabId}. Your current session stays here.`, "info");
+        if (!appAvailable) {
+          const registeredSpace = await registerFork(request, {
+            source: current.address, terminal: created.address, spaceId: targetSpace,
+            tabId, name, cwd: ctx.cwd,
+          });
+          if (registeredSpace !== targetSpace) {
+            await execJSON("hc", ["label", created.address, `herdr.space=${registeredSpace}`]);
+          }
+        }
+        ctx.ui.notify(appAvailable
+          ? `Opened “${name}” in ${tabId}. Your current session stays here.`
+          : `Opened “${name}” in your workspace as ${terminalName}. Direct attach: hc attach ${terminalName}. Your current session stays here.`,
+          "info");
       } catch (error) {
         // Preserve partial results: a timed-out launch may still have succeeded.
         ctx.ui.notify([

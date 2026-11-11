@@ -1,7 +1,7 @@
 {
   "name": "pi-herdr-session-fork",
-  "version": "0.1.0",
-  "description": "Fork a Pi conversation stage into a named herdr-app tab using herdr-core, while keeping the original session active.",
+  "version": "0.2.0",
+  "description": "Fork a Pi conversation stage into a named Herdr or Moshi workspace tab using herdr-core, with or without herdr-app.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -18,12 +18,14 @@
     "herdr",
     "herdr-core",
     "herdr-app",
+    "moshi",
     "session",
     "fork"
   ],
   "files": [
     "extensions",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "pi": {
@@ -34,6 +36,7 @@
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.mjs",
     "test:core": "node --experimental-strip-types --test test/core.integration.mjs",
+    "test:moshi": "node --experimental-strip-types --test test/moshi.integration.mjs",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {

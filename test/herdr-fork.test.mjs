@@ -3,7 +3,8 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import register from "../extensions/herdr-fork.ts";
+import { registerHfork as register } from "../extensions/herdr-fork.ts";
+import { CoreRpcError } from "../extensions/core-layout.ts";
 
 const branch = [
   { type: "message", id: "u1", parentId: null, message: { role: "user", content: "Design the API" } },
@@ -37,6 +38,22 @@ async function fixture(t, options = {}) {
   let handler;
   let launch;
   let adoptionReads = 0;
+  let document = { spaces: options.noSpace ? [] : [{
+    id: "source-space", name: "Source workspace", tabs: [{
+      id: "source-tab", name: "Source tab", root: { type: "block", content: { terminal: "t1" } },
+    }],
+  }] };
+  let version = 1;
+  const documentCalls = [];
+  const request = async (method, params) => {
+    documentCalls.push({ method, params: structuredClone(params) });
+    if (options.documentError) throw options.documentError;
+    if (method === "doc.get") return { value: structuredClone(document), version };
+    assert.equal(method, "doc.set");
+    if (params.version !== version) throw new CoreRpcError("conflict", "conflict");
+    document = structuredClone(params.value);
+    return { version: ++version };
+  };
   const listing = (adopted) => ({ spaces: [{
     id: "source-space", machine: null, active: false,
     tabs: adopted && launch ? [{
@@ -55,11 +72,15 @@ async function fixture(t, options = {}) {
       if (override !== undefined) return override;
       let response;
       if (command === "hc" && args[0] === "get") {
-        response = { address: args[1], state: "live", labels: { "herdr.space": "source-space" } };
+        response = { address: args[1], state: "live", labels: options.noSpace ? {} : { "herdr.space": "source-space" } };
+      } else if (command === "bash" && args[0] === "-lc" && args[1] === "command -v pi") {
+        return { code: 0, stdout: "/resolved/pi\n", stderr: "" };
       } else if (command === "herdr-app" && args[0] === "ls") {
+        if (options.noApp) return { code: 127, stdout: "", stderr: "spawn herdr-app ENOENT" };
         response = listing(Boolean(launch) && adoptionReads++ >= (options.adoptionDelay ?? 0));
       } else if (command === "hc" && args[0] === "run") {
-        launch = { tab: args.find((arg) => arg.startsWith("herdr.tab=")).slice("herdr.tab=".length) };
+        const tabArg = args.find((arg) => String(arg).startsWith("herdr.tab="));
+        launch = tabArg ? { tab: tabArg.slice("herdr.tab=".length) } : {};
         response = { address: "t2", state: "live" };
       } else if (command === "herdr-app" && args[0] === "do" && args[1] === "tab.rename") {
         response = {};
@@ -68,7 +89,7 @@ async function fixture(t, options = {}) {
       }
       return { code: 0, stdout: JSON.stringify(response), stderr: "" };
     },
-  });
+  }, request);
   const ctx = {
     mode: "tui", cwd: dir,
     sessionManager: {
@@ -82,7 +103,7 @@ async function fixture(t, options = {}) {
     },
   };
   return {
-    calls, notifications, source, dir, original, ctx,
+    calls, documentCalls, document: () => document, notifications, source, dir, original, ctx,
     run: () => handler("", ctx),
     forks: async () => (await readdir(dir)).filter((file) => file !== "source.jsonl"),
     fork: async () => {
@@ -121,13 +142,13 @@ test("forks the active branch in the source space without legacy environment or 
   for (const flag of ["--bg", "--json", "--no-parent", "--no-notify"]) assert.ok(launch.args.includes(flag));
   assert.ok(launch.args.includes("herdr.space=source-space"));
   assert.deepEqual(launch.args.slice(launch.args.indexOf("--") + 1), [
-    "pi", "--session", join(f.dir, file), "--name", name,
+    "/resolved/pi", "--session", join(f.dir, file), "--name", name,
   ]);
   const rename = f.calls.find((call) => call.args[1] === "tab.rename");
   assert.deepEqual(JSON.parse(rename.args[2]), {
     id: launch.args.find((arg) => arg.startsWith("herdr.tab=")).slice("herdr.tab=".length), name,
   });
-  assert.ok(f.calls.every((call) => call.command === "hc" || call.command === "herdr-app"));
+  assert.ok(f.calls.every((call) => ["hc", "herdr-app", "bash"].includes(call.command)));
   assert.ok(f.calls.every((call) => !["tab.new", "space.select", "tab.select", "pane.focus"].includes(call.args[1])));
 });
 
@@ -143,7 +164,65 @@ test("waits for app adoption without repeating the launch", async (t) => {
   await f.run();
   success(f);
   assert.equal(f.calls.filter((call) => call.args[0] === "run").length, 1);
+  // One availability probe before the prompts, then three adoption reads.
   assert.equal(f.calls.filter((call) => call.args[0] === "ls").length, 4);
+});
+
+test("without herdr-app it registers a named tab in the source workspace", async (t) => {
+  const f = await fixture(t, { noApp: true });
+  await f.run();
+  success(f);
+  assert.match(f.notifications.at(-1).message, /hc attach hfork-/);
+  assert.match(f.notifications.at(-1).message, /in your workspace/);
+  const launch = f.calls.find((call) => call.args[0] === "run");
+  assert.ok(launch);
+  assert.ok(launch.args.includes("herdr.space=source-space"));
+  assert.ok(launch.args.some((arg) => String(arg).startsWith("herdr.tab=tb")));
+  const forkTab = f.document().spaces[0].tabs[1];
+  assert.equal(forkTab.name, "Side discussion");
+  assert.equal(forkTab.root.children[0].content.terminal, "t2");
+  assert.equal(f.documentCalls.filter((call) => call.method === "doc.set").length, 1);
+  assert.deepEqual(launch.args.slice(launch.args.indexOf("--") + 1), [
+    "/resolved/pi", "--session", join(f.dir, (await f.forks())[0]), "--name", "Side discussion",
+  ]);
+  const launchName = launch.args[launch.args.indexOf("--name") + 1];
+  assert.match(launchName, /^hfork-[0-9a-f]{8}$/);
+  // The app is probed exactly once and never asked to adopt or rename.
+  assert.equal(f.calls.filter((call) => call.command === "herdr-app").length, 1);
+  assert.deepEqual((await f.fork()).slice(1), branch);
+  assert.equal(await readFile(f.source, "utf8"), f.original);
+});
+
+test("without an app or saved source space it registers a new workspace containing source and fork", async (t) => {
+  const f = await fixture(t, { noApp: true, noSpace: true });
+  await f.run();
+  success(f);
+  const launch = f.calls.find((call) => call.args[0] === "run");
+  assert.ok(launch);
+  const space = f.document().spaces[0];
+  assert.equal(space.folder, f.dir);
+  assert.equal(space.tabs.length, 2);
+  assert.equal(space.tabs[0].root.children[0].content.terminal, "t1");
+  assert.equal(space.tabs[1].root.children[0].content.terminal, "t2");
+  assert.ok(launch.args.includes(`herdr.space=${space.id}`));
+  assert.equal(f.calls.filter((call) => call.command === "herdr-app").length, 1);
+});
+
+test("a headless layout failure reports the live terminal without launching again", async (t) => {
+  const f = await fixture(t, { noApp: true, documentError: new Error("layout unavailable") });
+  await f.run();
+  failure(f, /layout unavailable/);
+  assert.match(f.notifications.at(-1).message, /Terminal: hfork-/);
+  assert.equal(f.calls.filter((call) => call.args[0] === "run").length, 1);
+  assert.equal((await f.forks()).length, 1);
+});
+
+test("a dead source terminal is refused before any prompt", async (t) => {
+  const f = await fixture(t, { exec: ({ args }) => args[0] === "get"
+    ? { code: 0, stdout: '{"address":"t1","state":"finished"}' } : undefined });
+  await f.run();
+  failure(f, /not live/);
+  assert.deepEqual(await f.forks(), []);
 });
 
 for (const [label, options] of [
@@ -226,4 +305,13 @@ test("an immediately exited Pi terminal is reported as a failure", async (t) => 
   await f.run();
   failure(f, /exited \(code 127\)/);
   assert.equal((await f.forks()).length, 1);
+});
+
+test("an unresolvable pi path is reported before launching", async (t) => {
+  const f = await fixture(t, { exec: ({ command }) => command === "bash"
+    ? { code: 1, stdout: "", stderr: "command not found" } : undefined });
+  await f.run();
+  failure(f, /resolve the pi executable/);
+  assert.equal((await f.forks()).length, 1);
+  assert.ok(!f.calls.some((call) => call.args[0] === "run"));
 });
